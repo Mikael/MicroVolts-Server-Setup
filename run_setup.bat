@@ -13,6 +13,20 @@ if '%errorlevel%' NEQ '0' (
 
 cd /d "%~dp0"
 
+REM Check for updates
+echo Checking for updates...
+git remote update
+git status -uno | findstr /C:"Your branch is behind" > nul
+if not errorlevel 1 (
+    echo New version found. Updating...
+    git pull
+    echo Restarting script...
+    start "" "%~f0"
+    exit
+) else (
+    echo Already up to date.
+)
+
 REM Check if Python is installed
 python --version >nul 2>&1
 if errorlevel 1 (

@@ -53,7 +53,6 @@ class MicroVoltsServerSetup:
             self.generate_random_password()
         
         self.center_window()
-        self.root.after(100, self.startup_update_check)
         
     def center_window(self):
         self.root.update_idletasks()
