@@ -81,6 +81,15 @@ After the setup completes successfully:
 3.  **Run the Servers:**
     - Once built, you can run the server executables from the build output directory.
 
+## Credits
+
+This tool is specifically designed for the [MicrovoltsEmulator](https://github.com/SoWeBegin/MicrovoltsEmulator), and all credit for the emulator goes to its respective developers.
+
+## Support
+
+If you encounter any issues or need help, you can join the community on Discord:
+[https://discord.gg/4epFV3uDsK](https://discord.gg/4epFV3uDsK)
+
 ## Configuration
 
 - **`config.ini`:** This file is located in the `MicrovoltsEmulator/Setup` directory and contains all the IP, port, and database settings for the servers.
