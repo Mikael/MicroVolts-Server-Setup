@@ -1053,31 +1053,27 @@ class MicroVoltsServerSetup:
                 self.log("vswhere.exe not found in standard locations. Cannot reliably check for Visual Studio.")
                 return False
 
-            # Step 1: Find the latest VS installation path, including previews
+            # Find the latest VS installation path, including previews
             cmd_find_path = [vswhere_path, "-latest", "-prerelease", "-property", "installationPath"]
             self.log(f"Running command: {' '.join(cmd_find_path)}")
             path_result = subprocess.run(cmd_find_path, capture_output=True, text=True, shell=False)
 
             if path_result.returncode != 0 or not path_result.stdout.strip():
-                self.log("Could not find any Visual Studio installation path.")
+                self.log("Could not find any Visual Studio installation path via vswhere.")
                 return False
             
             vs_install_path = path_result.stdout.strip()
             self.log(f"Found Visual Studio installation at: {vs_install_path}")
 
-            # Step 2: Check if that specific installation has the C++ workload
-            cmd_check_workload = [vswhere_path, "-latest", "-prerelease", "-products", "*", "-requires", "Microsoft.VisualStudio.Workload.NativeDesktop", "-path", vs_install_path]
-            self.log(f"Running command: {' '.join(cmd_check_workload)}")
-            workload_result = subprocess.run(cmd_check_workload, capture_output=True, text=True, shell=False)
+            # Check for the existence of vcvarsall.bat as a proxy for the C++ workload
+            vcvarsall_path = os.path.join(vs_install_path, "VC", "Auxiliary", "Build", "vcvarsall.bat")
+            self.log(f"Checking for C++ build tools at: {vcvarsall_path}")
 
-            if workload_result.returncode == 0 and workload_result.stdout.strip():
-                self.log("Confirmed: Visual Studio with C++ workload is installed.")
+            if os.path.exists(vcvarsall_path):
+                self.log("Found vcvarsall.bat. C++ workload is considered installed.")
                 return True
             else:
-                self.log("Visual Studio installation found, but C++ workload is missing or not detected.")
-                self.log(f"Workload check output: {workload_result.stdout.strip()}")
-                self.log(f"Workload check error: {workload_result.stderr.strip()}")
-                self.log(f"Workload check return code: {workload_result.returncode}")
+                self.log("vcvarsall.bat not found. C++ workload is not installed or in an unexpected location.")
                 return False
         except Exception as e:
             self.log(f"Error checking for Visual Studio: {e}")
