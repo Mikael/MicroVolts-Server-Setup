@@ -868,7 +868,7 @@ class MicroVoltsServerSetup:
                 return True
             else:
                 self.log(f"Build failed with exit code {process.returncode}")
-                messagebox.showerror("Build Failed", f"The project failed to recompile with exit code {process.returncode}. Check the log for details.")
+               # messagebox.showerror("Build Failed", f"The project failed to recompile with exit code {process.returncode}. Check the log for details.")
                 return False
         except Exception as e:
             self.log(f"An error occurred during recompilation: {e}")
