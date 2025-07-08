@@ -782,9 +782,66 @@ class MicroVoltsServerSetup:
             self.log(f"Using MSBuild at: {msbuild_path}")
 
             self.log(f"Cleaning and rebuilding solution: {sln_file}...")
-            build_cmd = [msbuild_path, sln_file, "/p:Configuration=Release", "/p:Platform=x64", "/m"]
+
+            # Find vcvarsall.bat to set up the build environment
+            vswhere_cmd = [vswhere_path, "-latest", "-property", "installationPath"]
+            vs_path_result = subprocess.run(vswhere_cmd, capture_output=True, text=True, shell=True)
+            if vs_path_result.returncode != 0 or not vs_path_result.stdout.strip():
+                self.log("Could not find Visual Studio installation path.")
+                messagebox.showerror("Error", "Could not find Visual Studio installation path.")
+                return False
             
-            process = subprocess.Popen(build_cmd, cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True)
+            vs_path = vs_path_result.stdout.strip()
+            vcvarsall_path = os.path.join(vs_path, "VC", "Auxiliary", "Build", "vcvarsall.bat")
+
+            if not os.path.exists(vcvarsall_path):
+                self.log(f"vcvarsall.bat not found at: {vcvarsall_path}")
+                messagebox.showerror("Error", f"Could not find vcvarsall.bat. Build environment cannot be set up.")
+                return False
+
+            self.log(f"Using vcvarsall.bat from: {vcvarsall_path}")
+
+            # Build "Common" project first
+            self.log("Building 'Common' project...")
+            common_build_cmd = f'call "{vcvarsall_path}" x64 && "{msbuild_path}" "{sln_file}" /t:Common /p:Configuration=Release /p:Platform=x64 /m'
+            
+            self.log(f"Executing build command: {common_build_cmd}")
+            common_process = subprocess.Popen(
+                common_build_cmd,
+                cwd=repo_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                shell=True
+            )
+            for line in common_process.stdout:
+                self.log(line.strip())
+            common_process.wait()
+
+            if common_process.returncode != 0:
+                self.log("'Common' project build failed. Aborting.")
+                messagebox.showerror("Build Failed", "The 'Common' project failed to build. Check the log for details.")
+                return False
+            
+            self.log("'Common' project built successfully.")
+
+            # Build the rest of the solution
+            self.log("Building the rest of the solution...")
+            solution_build_cmd = f'call "{vcvarsall_path}" x64 && "{msbuild_path}" "{sln_file}" /p:Configuration=Release /p:Platform=x64 /m'
+
+            self.log(f"Executing build command: {solution_build_cmd}")
+            process = subprocess.Popen(
+                solution_build_cmd,
+                cwd=repo_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                shell=True
+            )
 
             for line in process.stdout:
                 self.log(line.strip())

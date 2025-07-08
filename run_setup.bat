@@ -37,8 +37,7 @@ if errorlevel 1 (
 )
 
 REM Install requirements if needed
-echo Installing required packages...
-pip install -r requirements.txt
+pip install -q -r requirements.txt
 
 REM Run the setup script
 echo Starting MicroVolts Server Setup GUI...
