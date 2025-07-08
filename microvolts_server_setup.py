@@ -1038,7 +1038,9 @@ class MicroVoltsServerSetup:
             vswhere_path = None
             possible_paths = [
                 "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe",
-                "C:\\Program Files\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+                "C:\\Program Files\\Microsoft Visual Studio\\Installer\\vswhere.exe",
+                "C:\\Program Files (x86)\\Microsoft Visual Studio\\Preview\\Installer\\vswhere.exe",
+                "C:\\Program Files\\Microsoft Visual Studio\\Preview\\Installer\\vswhere.exe"
             ]
 
             for path in possible_paths:
@@ -1051,18 +1053,31 @@ class MicroVoltsServerSetup:
                 self.log("vswhere.exe not found in standard locations. Cannot reliably check for Visual Studio.")
                 return False
 
-            cmd = [vswhere_path, "-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Workload.NativeDesktop", "-property", "installationPath"]
-            self.log(f"Running command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, shell=False)
+            # Step 1: Find the latest VS installation path, including previews
+            cmd_find_path = [vswhere_path, "-latest", "-prerelease", "-property", "installationPath"]
+            self.log(f"Running command: {' '.join(cmd_find_path)}")
+            path_result = subprocess.run(cmd_find_path, capture_output=True, text=True, shell=False)
+
+            if path_result.returncode != 0 or not path_result.stdout.strip():
+                self.log("Could not find any Visual Studio installation path.")
+                return False
             
-            if result.returncode == 0 and result.stdout.strip():
-                self.log(f"Found Visual Studio with C++ workload at: {result.stdout.strip()}")
+            vs_install_path = path_result.stdout.strip()
+            self.log(f"Found Visual Studio installation at: {vs_install_path}")
+
+            # Step 2: Check if that specific installation has the C++ workload
+            cmd_check_workload = [vswhere_path, "-latest", "-prerelease", "-products", "*", "-requires", "Microsoft.VisualStudio.Workload.NativeDesktop", "-path", vs_install_path]
+            self.log(f"Running command: {' '.join(cmd_check_workload)}")
+            workload_result = subprocess.run(cmd_check_workload, capture_output=True, text=True, shell=False)
+
+            if workload_result.returncode == 0 and workload_result.stdout.strip():
+                self.log("Confirmed: Visual Studio with C++ workload is installed.")
                 return True
             else:
-                self.log("Visual Studio with C++ workload not found via vswhere.")
-                self.log(f"vswhere output: {result.stdout.strip()}")
-                self.log(f"vswhere error: {result.stderr.strip()}")
-                self.log(f"vswhere return code: {result.returncode}")
+                self.log("Visual Studio installation found, but C++ workload is missing or not detected.")
+                self.log(f"Workload check output: {workload_result.stdout.strip()}")
+                self.log(f"Workload check error: {workload_result.stderr.strip()}")
+                self.log(f"Workload check return code: {workload_result.returncode}")
                 return False
         except Exception as e:
             self.log(f"Error checking for Visual Studio: {e}")
@@ -1178,7 +1193,9 @@ class MicroVoltsServerSetup:
             vswhere_path = None
             possible_vswhere_paths = [
                 "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe",
-                "C:\\Program Files\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+                "C:\\Program Files\\Microsoft Visual Studio\\Installer\\vswhere.exe",
+                "C:\\Program Files (x86)\\Microsoft Visual Studio\\Preview\\Installer\\vswhere.exe",
+                "C:\\Program Files\\Microsoft Visual Studio\\Preview\\Installer\\vswhere.exe"
             ]
             for path in possible_vswhere_paths:
                 if os.path.exists(path):
@@ -1190,7 +1207,7 @@ class MicroVoltsServerSetup:
                 messagebox.showerror("Error", "Could not locate vswhere.exe to find MSBuild.")
                 return False
 
-            cmd = [vswhere_path, "-latest", "-find", "MSBuild\\**\\Bin\\MSBuild.exe"]
+            cmd = [vswhere_path, "-latest", "-prerelease", "-find", "MSBuild\\**\\Bin\\MSBuild.exe"]
             result = subprocess.run(cmd, capture_output=True, text=True, shell=False)
             
             if result.returncode != 0 or not result.stdout.strip():
@@ -1204,7 +1221,7 @@ class MicroVoltsServerSetup:
             self.log(f"Cleaning and rebuilding solution: {sln_file}...")
 
             # Find vcvarsall.bat to set up the build environment
-            vswhere_cmd = [vswhere_path, "-latest", "-property", "installationPath"]
+            vswhere_cmd = [vswhere_path, "-latest", "-prerelease", "-property", "installationPath"]
             vs_path_result = subprocess.run(vswhere_cmd, capture_output=True, text=True, shell=False)
             if vs_path_result.returncode != 0 or not vs_path_result.stdout.strip():
                 self.log("Could not find Visual Studio installation path.")
