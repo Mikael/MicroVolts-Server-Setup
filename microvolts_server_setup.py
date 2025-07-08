@@ -1035,15 +1035,16 @@ class MicroVoltsServerSetup:
 
     def is_vs_installed(self):
         try:
-            possible_paths = [
-                os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft Visual Studio", "Installer", "vswhere.exe"),
-                os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft Visual Studio", "Installer", "vswhere.exe")
-            ]
-            
             vswhere_path = None
+            possible_paths = [
+                "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe",
+                "C:\\Program Files\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+            ]
+
             for path in possible_paths:
                 if os.path.exists(path):
                     vswhere_path = path
+                    self.log(f"Found vswhere.exe at: {vswhere_path}")
                     break
 
             if not vswhere_path:
@@ -1051,13 +1052,17 @@ class MicroVoltsServerSetup:
                 return False
 
             cmd = [vswhere_path, "-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Workload.NativeDesktop", "-property", "installationPath"]
-            result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
+            self.log(f"Running command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, shell=False)
             
             if result.returncode == 0 and result.stdout.strip():
-                self.log(f"Found Visual Studio at: {result.stdout.strip()}")
+                self.log(f"Found Visual Studio with C++ workload at: {result.stdout.strip()}")
                 return True
             else:
                 self.log("Visual Studio with C++ workload not found via vswhere.")
+                self.log(f"vswhere output: {result.stdout.strip()}")
+                self.log(f"vswhere error: {result.stderr.strip()}")
+                self.log(f"vswhere return code: {result.returncode}")
                 return False
         except Exception as e:
             self.log(f"Error checking for Visual Studio: {e}")
@@ -1170,14 +1175,23 @@ class MicroVoltsServerSetup:
             
         try:
             self.log("Finding MSBuild.exe...")
-            vswhere_path = os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "Microsoft Visual Studio", "Installer", "vswhere.exe")
-            if not os.path.exists(vswhere_path):
+            vswhere_path = None
+            possible_vswhere_paths = [
+                "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe",
+                "C:\\Program Files\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+            ]
+            for path in possible_vswhere_paths:
+                if os.path.exists(path):
+                    vswhere_path = path
+                    break
+            
+            if not vswhere_path:
                 self.log("vswhere.exe not found, cannot locate MSBuild.")
                 messagebox.showerror("Error", "Could not locate vswhere.exe to find MSBuild.")
                 return False
 
             cmd = [vswhere_path, "-latest", "-find", "MSBuild\\**\\Bin\\MSBuild.exe"]
-            result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, shell=False)
             
             if result.returncode != 0 or not result.stdout.strip():
                 self.log("Could not find MSBuild.exe via vswhere.")
@@ -1191,7 +1205,7 @@ class MicroVoltsServerSetup:
 
             # Find vcvarsall.bat to set up the build environment
             vswhere_cmd = [vswhere_path, "-latest", "-property", "installationPath"]
-            vs_path_result = subprocess.run(vswhere_cmd, capture_output=True, text=True, shell=True)
+            vs_path_result = subprocess.run(vswhere_cmd, capture_output=True, text=True, shell=False)
             if vs_path_result.returncode != 0 or not vs_path_result.stdout.strip():
                 self.log("Could not find Visual Studio installation path.")
                 messagebox.showerror("Error", "Could not find Visual Studio installation path.")
