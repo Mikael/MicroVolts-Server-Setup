@@ -1035,9 +1035,19 @@ class MicroVoltsServerSetup:
 
     def is_vs_installed(self):
         try:
-            vswhere_path = os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft Visual Studio", "Installer", "vswhere.exe")
-            if not os.path.exists(vswhere_path):
-                self.log("vswhere.exe not found. Cannot reliably check for Visual Studio.")
+            possible_paths = [
+                os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft Visual Studio", "Installer", "vswhere.exe"),
+                os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft Visual Studio", "Installer", "vswhere.exe")
+            ]
+            
+            vswhere_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    vswhere_path = path
+                    break
+
+            if not vswhere_path:
+                self.log("vswhere.exe not found in standard locations. Cannot reliably check for Visual Studio.")
                 return False
 
             cmd = [vswhere_path, "-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Workload.NativeDesktop", "-property", "installationPath"]
