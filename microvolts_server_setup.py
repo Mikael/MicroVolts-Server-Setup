@@ -1452,6 +1452,7 @@ class MicroVoltsServerSetup:
     
     def add_to_system_path(self, path):
         """Add a path to the system PATH environment variable permanently, requesting admin rights."""
+        import os
         try:
             self.log(f"Attempting to add {path} to system PATH...")
 
@@ -1506,6 +1507,7 @@ class MicroVoltsServerSetup:
     
     def configure_vs_for_llvm(self):
         """Configure Visual Studio to recognize and use LLVM/Clang"""
+        import os
         try:
             self.log("Configuring Visual Studio for LLVM/Clang...")
             
