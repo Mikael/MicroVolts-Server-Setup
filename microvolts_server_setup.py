@@ -758,23 +758,16 @@ class MicroVoltsServerSetup:
 
     def auto_detect_ip(self):
         try:
-            result = subprocess.run(['ipconfig'], capture_output=True, text=True, shell=True)
-            lines = result.stdout.split('\n')
-            found_ips = set()
-            
-            for line in lines:
-                if 'IPv4 Address' in line:
-                    ip = line.split(':')[-1].strip()
-                    if self.is_private_ip(ip) and ip not in found_ips:
-                        found_ips.add(ip)
-                        self.local_ip.set(ip)
-                        self.log(f"Auto-detected local IP: {ip}")
-                        break
-                        
-            if not found_ips:
-                self.log("No private IP addresses found")
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            self.local_ip.set(ip)
+            self.log(f"Auto-detected local IP: {ip}")
         except Exception as e:
-            self.log(f"Failed to auto-detect IP: {str(e)}")
+            self.log(f"Failed to auto-detect IP: {str(e)}. Falling back to 127.0.0.1")
+            self.local_ip.set("127.0.0.1")
 
     def toggle_mariadb_fields(self):
         if self.existing_mariadb.get():
@@ -1740,14 +1733,12 @@ class MicroVoltsServerSetup:
         
     def _get_local_ip(self):
         try:
-            result = subprocess.run(['ipconfig'], capture_output=True, text=True, shell=True)
-            lines = result.stdout.split('\n')
-            for line in lines:
-                if 'IPv4 Address' in line:
-                    ip = line.split(':')[-1].strip()
-                    if self.is_private_ip(ip):
-                        return ip
-            return "127.0.0.1"
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
         except Exception:
             return "127.0.0.1"
 
