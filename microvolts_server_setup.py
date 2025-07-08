@@ -15,11 +15,388 @@ import secrets
 import string
 import sys
 import time
+import re
+
+# Imports from Database Editor
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
+    QMessageBox, QDialog, QDialogButtonBox, QInputDialog, QComboBox
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+import mariadb
+
+# Database Editor Classes
+class DatabaseThread(QThread):
+    connection_signal = pyqtSignal(object)
+    tables_signal = pyqtSignal(list)
+    table_data_signal = pyqtSignal(object)
+    update_signal = pyqtSignal(bool)
+    error_signal = pyqtSignal(str)
+    player_grades_signal = pyqtSignal(list)
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.connection = None
+
+    def run(self):
+        try:
+            self.connection = mariadb.connect(**self.config)
+            self.connection_signal.emit(self.connection)
+        except mariadb.Error as err:
+            self.error_signal.emit(f"Error connecting to MariaDB: {err}")
+
+    def list_tables(self):
+        if self.connection:
+            try:
+                cursor = self.connection.cursor()
+                cursor.execute("SHOW TABLES")
+                tables = [table[0] for table in cursor.fetchall()]
+                self.tables_signal.emit(tables)
+            except mariadb.Error as err:
+                self.error_signal.emit(f"Error listing tables: {err}")
+
+    def get_table_data(self, table_name):
+        if self.connection:
+            try:
+                cursor = self.connection.cursor(dictionary=True)
+                cursor.execute(f"SELECT * FROM {table_name}")
+                data = cursor.fetchall()
+                self.table_data_signal.emit({"table_name": table_name, "data": data})
+            except mariadb.Error as err:
+                self.error_signal.emit(f"Error getting table data: {err}")
+
+    def update_cell_value(self, table_name, column_name, new_value, primary_key_column, primary_key_value):
+        if self.connection:
+            try:
+                cursor = self.connection.cursor()
+                query = f"UPDATE {table_name} SET {column_name} = ? WHERE {primary_key_column} = ?"
+                cursor.execute(query, (new_value, primary_key_value))
+                self.connection.commit()
+                self.update_signal.emit(True)
+            except mariadb.Error as err:
+                self.error_signal.emit(f"Error updating cell value: {err}")
+                self.update_signal.emit(False)
+
+    def get_player_grades(self):
+        if self.connection:
+            try:
+                cursor = self.connection.cursor()
+                cursor.execute("SELECT DISTINCT Grade FROM PlayerGrade")
+                grades = [grade[0] for grade in cursor.fetchall()]
+                self.player_grades_signal.emit(grades)
+            except mariadb.Error as err:
+                self.error_signal.emit(f"Error getting player grades: {err}")
+
+
+class LoginDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Database Login")
+        self.layout = QVBoxLayout(self)
+
+        self.ip_input = QLineEdit()
+        self.ip_input.setPlaceholderText("IP Address/Hostname")
+        self.layout.addWidget(QLabel("IP Address/Hostname:"))
+        self.layout.addWidget(self.ip_input)
+
+        self.port_input = QLineEdit()
+        self.port_input.setPlaceholderText("Port (default: 3306)")
+        self.layout.addWidget(QLabel("Port:"))
+        self.layout.addWidget(self.port_input)
+
+        self.user_input = QLineEdit()
+        self.user_input.setPlaceholderText("Username")
+        self.layout.addWidget(QLabel("Username:"))
+        self.layout.addWidget(self.user_input)
+
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_input.setPlaceholderText("Password")
+        self.layout.addWidget(QLabel("Password:"))
+        self.layout.addWidget(self.password_input)
+        
+        self.db_input = QLineEdit()
+        self.db_input.setPlaceholderText("Database")
+        self.layout.addWidget(QLabel("Database:"))
+        self.layout.addWidget(self.db_input)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.layout.addWidget(self.buttons)
+
+    def get_credentials(self):
+        try:
+            port = int(self.port_input.text())
+        except ValueError:
+            port = 3306
+        return {
+            "host": self.ip_input.text(),
+            "port": port,
+            "user": self.user_input.text(),
+            "password": self.password_input.text(),
+            "database": self.db_input.text()
+        }
+
+
+class DatabaseEditorMainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Database Editor")
+        self.setGeometry(100, 100, 800, 600)
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.layout = QHBoxLayout(self.central_widget)
+
+        self.tables_list_widget = QTableWidget()
+        self.tables_list_widget.setColumnCount(1)
+        self.tables_list_widget.setHorizontalHeaderLabels(["Tables"])
+        self.tables_list_widget.itemClicked.connect(self.table_selected)
+        self.layout.addWidget(self.tables_list_widget)
+
+        self.table_data_widget = QTableWidget()
+        self.table_data_widget.itemDoubleClicked.connect(self.edit_cell)
+        self.layout.addWidget(self.table_data_widget)
+
+        self.db_thread = None
+        self.current_table = None
+        self.attempt_auto_login()
+
+    def attempt_auto_login(self):
+        config_file = "mv_setup_config.json"
+        credentials = None
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                credentials = {
+                    "host": config.get("db_ip", "127.0.0.1"),
+                    "port": int(config.get("db_port", 3306)),
+                    "user": config.get("db_username", "root"),
+                    "password": config.get("db_password", ""),
+                    "database": config.get("db_name", "microvolts-db")
+                }
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                self.show_error(f"Error reading config file: {e}")
+                credentials = None
+        
+        if credentials:
+            self.db_thread = DatabaseThread(credentials)
+            self.db_thread.connection_signal.connect(self.on_connection)
+            self.db_thread.error_signal.connect(self.on_auto_login_error)
+            self.db_thread.start()
+        else:
+            self.login() # Fallback to manual login
+
+    def on_auto_login_error(self, error_message):
+        self.show_error(f"Auto-login failed: {error_message}\nPlease log in manually.")
+        self.login()
+
+    def login(self):
+        # Disconnect previous error signal if any
+        if self.db_thread and hasattr(self.db_thread, 'error_signal'):
+            try:
+                self.db_thread.error_signal.disconnect(self.on_auto_login_error)
+            except TypeError:
+                pass # Signal not connected
+
+        dialog = LoginDialog(self)
+        if dialog.exec():
+            credentials = dialog.get_credentials()
+            self.db_thread = DatabaseThread(credentials)
+            self.db_thread.connection_signal.connect(self.on_connection)
+            self.db_thread.error_signal.connect(self.show_error)
+            self.db_thread.start()
+        else:
+            # If the user cancels the manual login, close the window.
+            self.close()
+
+    def on_connection(self, connection):
+        if connection:
+            self.db_thread.tables_signal.connect(self.show_tables)
+            self.db_thread.list_tables()
+        else:
+            self.show_error("Failed to connect to the database.")
+
+    def show_tables(self, tables):
+        self.tables_list_widget.setRowCount(len(tables))
+        for i, table_name in enumerate(tables):
+            self.tables_list_widget.setItem(i, 0, QTableWidgetItem(table_name))
+
+    def table_selected(self, item):
+        self.current_table = item.text()
+        self.db_thread.table_data_signal.connect(self.show_table_data)
+        self.db_thread.get_table_data(self.current_table)
+
+    def show_table_data(self, result):
+        table_name = result["table_name"]
+        data = result["data"]
+        if table_name != self.current_table:
+            return
+
+        if not data:
+            self.table_data_widget.setRowCount(0)
+            self.table_data_widget.setColumnCount(0)
+            return
+
+        self.table_data_widget.setRowCount(len(data))
+        self.table_data_widget.setColumnCount(len(data[0]))
+        
+        column_names = list(data[0].keys())
+        self.table_data_widget.setHorizontalHeaderLabels(column_names)
+
+        for i, row in enumerate(data):
+            for j, col_name in enumerate(column_names):
+                self.table_data_widget.setItem(i, j, QTableWidgetItem(str(row[col_name])))
+
+    def edit_cell(self, item):
+        row = item.row()
+        column = item.column()
+        column_name = self.table_data_widget.horizontalHeaderItem(column).text()
+        current_value = item.text()
+        
+        primary_key_column = self.table_data_widget.horizontalHeaderItem(0).text()
+        primary_key_value = self.table_data_widget.item(row, 0).text()
+
+        if self.current_table == "Users" and column_name == "Grade":
+            self.db_thread.player_grades_signal.connect(self.show_grade_dialog)
+            self.db_thread.get_player_grades()
+        else:
+            new_value, ok = QInputDialog.getText(self, "Edit Cell", f"Enter new value for {column_name}:", QLineEdit.EchoMode.Normal, current_value)
+            if ok and new_value != current_value:
+                self.db_thread.update_signal.connect(self.on_update)
+                self.db_thread.update_cell_value(self.current_table, column_name, new_value, primary_key_column, primary_key_value)
+
+    def show_grade_dialog(self, grades):
+        grade, ok = QInputDialog.getItem(self, "Select Grade", "Select a new grade:", grades, 0, False)
+        if ok and grade:
+            row = self.table_data_widget.currentRow()
+            column = self.table_data_widget.currentColumn()
+            column_name = self.table_data_widget.horizontalHeaderItem(column).text()
+            primary_key_column = self.table_data_widget.horizontalHeaderItem(0).text()
+            primary_key_value = self.table_data_widget.item(row, 0).text()
+            self.db_thread.update_signal.connect(self.on_update)
+            self.db_thread.update_cell_value(self.current_table, column_name, grade, primary_key_column, primary_key_value)
+
+    def on_update(self, success):
+        if success:
+            self.db_thread.get_table_data(self.current_table)
+        else:
+            self.show_error("Failed to update the database.")
+
+    def show_error(self, message):
+        QMessageBox.critical(self, "Error", message)
+
+
+def run_db_editor_app_process():
+    app = QApplication(sys.argv)
+    
+    dark_stylesheet = """
+        QWidget {
+            background-color: #2e2e2e;
+            color: #e0e0e0;
+            font-family: "Segoe UI", "Helvetica Neue", "Arial", sans-serif;
+        }
+        QMainWindow, QDialog {
+            background-color: #353535;
+        }
+        QTableWidget {
+            background-color: #252525;
+            color: #e0e0e0;
+            border: 1px solid #444;
+            gridline-color: #444;
+        }
+        QHeaderView::section {
+            background-color: #3a3a3a;
+            color: #e0e0e0;
+            padding: 5px;
+            border: 1px solid #444;
+            border-bottom: 2px solid #0078d4;
+        }
+        QTableCornerButton::section {
+            background-color: #3a3a3a;
+        }
+        QScrollBar:vertical {
+            border: none;
+            background: #252525;
+            width: 12px;
+            margin: 15px 0 15px 0;
+            border-radius: 6px;
+        }
+        QScrollBar::handle:vertical {
+            background: #555;
+            min-height: 20px;
+            border-radius: 6px;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
+        }
+        QScrollBar:horizontal {
+            border: none;
+            background: #252525;
+            height: 12px;
+            margin: 0 15px 0 15px;
+            border-radius: 6px;
+        }
+        QScrollBar::handle:horizontal {
+            background: #555;
+            min-width: 20px;
+            border-radius: 6px;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            width: 0px;
+        }
+        QPushButton {
+            background-color: #0078d4;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        QPushButton:hover {
+            background-color: #106ebe;
+        }
+        QPushButton:pressed {
+            background-color: #005a9e;
+        }
+        QLineEdit, QComboBox {
+            background-color: #252525;
+            color: #e0e0e0;
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 5px;
+        }
+        QLineEdit:focus, QComboBox:focus {
+            border: 1px solid #0078d4;
+        }
+        QComboBox::drop-down {
+            border: none;
+        }
+        QComboBox::down-arrow {
+            image: url(down_arrow.png);
+        }
+        QLabel {
+            color: #e0e0e0;
+        }
+        QMessageBox {
+            background-color: #353535;
+        }
+    """
+    app.setStyleSheet(dark_stylesheet)
+
+    editor = DatabaseEditorMainWindow()
+    editor.show()
+    sys.exit(app.exec())
+
 
 class MicroVoltsServerSetup:
     def __init__(self, root):
         self.root = root
-        self.root.title("MicroVolts Server Setup v2")
+        self.root.title("MicroVolts Server Setup v2.1 | @Mikael")
         self.root.geometry("850x750")
         self.root.resizable(True, True)
 
@@ -59,6 +436,11 @@ class MicroVoltsServerSetup:
         x = (self.root.winfo_screenwidth() // 2) - (self.root.winfo_width() // 2)
         y = (self.root.winfo_screenheight() // 2) - (self.root.winfo_height() // 2)
         self.root.geometry(f"+{x}+{y}")
+
+    def browse_directory(self):
+        directory = filedialog.askdirectory()
+        if directory:
+            self.project_path.set(directory)
 
     def load_settings(self):
         if os.path.exists(self.config_file):
@@ -284,10 +666,30 @@ class MicroVoltsServerSetup:
         self.update_button = ttk.Button(update_frame, text="Check for Updates & Recompile", command=self.check_for_updates)
         self.update_button.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
 
+        command_editor_button = ttk.Button(update_frame, text="Command Permissions Editor", command=self.open_command_editor)
+        command_editor_button.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+
+        db_editor_button = ttk.Button(update_frame, text="Database Editor", command=self.open_database_editor)
+        db_editor_button.grid(row=2, column=0, padx=5, pady=5, sticky="ew")
+
         main_frame.rowconfigure(3, weight=1)
         
         self.setup_running = False
         self.toggle_mariadb_fields()
+
+    def open_database_editor(self):
+        self.save_settings()
+
+        if not self.db_ip.get() or not self.db_username.get() or not self.db_name.get():
+            messagebox.showerror("Database Error", "Database details are not configured. Please fill in the database information on the 'Database Configuration' tab first.")
+            self.log("Failed to open Database Editor: Details not configured.")
+            return
+
+        self.log("Opening Database Editor...")
+        # Run the editor in a separate process to avoid conflicts between Tkinter and PyQt
+        from multiprocessing import Process
+        p = Process(target=run_db_editor_app_process)
+        p.start()
 
     def add_server_row(self):
         server_number = len(self.server_widgets) + 2
@@ -354,19 +756,6 @@ class MicroVoltsServerSetup:
         for i, widgets in enumerate(self.server_widgets):
             widgets["frame"].config(text=f"Server {i + 2}")
 
-    def toggle_mariadb_fields(self):
-        if self.existing_mariadb.get():
-            self.existing_db_frame.grid(row=2, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=10, padx=5)
-            self.db_install_frame.grid_remove()
-        else:
-            self.existing_db_frame.grid_remove()
-            self.db_install_frame.grid()
-        
-    def browse_directory(self):
-        directory = filedialog.askdirectory()
-        if directory:
-            self.project_path.set(directory)
-            
     def auto_detect_ip(self):
         try:
             result = subprocess.run(['ipconfig'], capture_output=True, text=True, shell=True)
@@ -386,7 +775,14 @@ class MicroVoltsServerSetup:
                 self.log("No private IP addresses found")
         except Exception as e:
             self.log(f"Failed to auto-detect IP: {str(e)}")
-    
+
+    def toggle_mariadb_fields(self):
+        if self.existing_mariadb.get():
+            self.existing_db_frame.grid(row=2, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=10, padx=5)
+            self.db_install_frame.grid_remove()
+        else:
+            self.existing_db_frame.grid_remove()
+            self.db_install_frame.grid()
     
     def is_valid_ip(self, ip):
         """Basic IP address validation"""
@@ -1584,6 +1980,12 @@ plugin-dir="{plugin_dir}"
         except Exception as e:
             self.log(f"Failed to configure my.ini: {str(e)}")
 
+    def open_command_editor(self):
+        if not self.project_path.get() or not os.path.isdir(self.project_path.get()):
+            messagebox.showerror("Error", "Please select a valid installation directory first.")
+            return
+        CommandEditorWindow(self.root, self.project_path.get())
+
     def setup_database(self):
         if not self.setup_running:
             return False
@@ -1672,6 +2074,214 @@ plugin-dir="{plugin_dir}"
             self.log(f"Failed to setup database: {str(e)}")
             return False
 
+class CommandEditorWindow(tk.Toplevel):
+    def __init__(self, parent, project_path):
+        super().__init__(parent)
+        self.title("Command Permission Editor")
+        self.geometry("900x600")
+        self.transient(parent)
+        self.grab_set()
+
+        self.project_path = project_path
+        self.commands = {}
+        self.command_files_path = os.path.join(self.project_path, 'MicrovoltsEmulator', 'MainServer', 'include', 'ChatCommands', 'Commands')
+        self.player_enums_path = os.path.join(self.project_path, 'MicrovoltsEmulator', 'Common', 'include', 'Enums', 'PlayerEnums.h')
+
+        self.grades = self.load_grades()
+        
+        self.style = ttk.Style(self)
+        self.style.configure("Treeview", rowheight=25, font=('Helvetica', 10))
+        self.style.configure("Treeview.Heading", font=('Helvetica', 10, 'bold'))
+        self.style.map("Treeview", background=[('selected', '#0078d4')])
+
+        self.main_frame = ttk.Frame(self, padding="10")
+        self.main_frame.pack(fill="both", expand=True)
+        self.main_frame.columnconfigure(0, weight=1)
+        self.main_frame.rowconfigure(0, weight=1)
+
+        self.create_widgets()
+        self.load_commands()
+
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill="x", pady=10, padx=10)
+        
+        # Add a label for instructions
+        instructions = "Double-click a permission to change it. Your changes are temporary until you click 'Save Changes'."
+        ttk.Label(button_frame, text=instructions, style="Italic.TLabel").pack(side="left", expand=True, fill="x")
+        
+        save_button = ttk.Button(button_frame, text="Save Changes", command=self.save_changes, style="Accent.TButton")
+        save_button.pack(side="right")
+        
+        self.style.configure("Italic.TLabel", font=('Helvetica', 9, 'italic'))
+
+    def load_grades(self):
+        try:
+            with open(self.player_enums_path, 'r') as f:
+                content = f.read()
+            
+            enum_content_match = re.search(r'enum\s+PlayerGrade\s*{([^}]+)}', content)
+            if not enum_content_match:
+                raise ValueError("PlayerGrade enum not found")
+
+            enum_content = enum_content_match.group(1)
+            grade_regex = re.compile(r'(\w+)\s*=\s*\d+')
+            grades = grade_regex.findall(enum_content)
+            
+            if not grades:
+                raise ValueError("No grades found in PlayerGrade enum")
+
+            return grades
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load player grades from PlayerEnums.h:\n{e}")
+            self.destroy()
+            return []
+
+    def load_commands(self):
+        description_regex = re.compile(r'ICommand\s*{\s*[^,]+,\s*"([^"]+)"')
+        permission_regex = re.compile(r"REGISTER_CMD\(\s*(\w+)\s*,\s*Common::Enums::PlayerGrade::(\w+)\)")
+
+        if not os.path.isdir(self.command_files_path):
+            messagebox.showerror("Error", f"Commands directory not found at:\n{self.command_files_path}")
+            self.destroy()
+            return
+
+        for filename in os.listdir(self.command_files_path):
+            if filename.endswith(".h"):
+                filepath = os.path.join(self.command_files_path, filename)
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    
+                    matches = permission_regex.finditer(content)
+                    for match in matches:
+                        command_name = match.group(1)
+                        permission = match.group(2)
+                        
+                        class_def_search_area = content[:match.start()]
+                        
+                        class_regex = re.compile(r"(?:class|struct)\s+" + re.escape(command_name) + r"\s*(?:final)?\s*:\s*public")
+                        class_match = class_regex.search(class_def_search_area)
+                        
+                        if class_match:
+                            constructor_area = class_def_search_area[class_match.start():]
+                            desc_match = description_regex.search(constructor_area)
+                            if desc_match:
+                                description = desc_match.group(1)
+                                self.commands[command_name] = {
+                                    "file": filepath,
+                                    "permission": permission,
+                                    "description": description,
+                                    "original_permission": permission
+                                }
+        
+        self.populate_tree()
+
+    def create_widgets(self):
+        tree_frame = ttk.Frame(self.main_frame)
+        tree_frame.grid(row=0, column=0, sticky="nsew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(tree_frame, columns=("Command", "Description", "Permission"), show="headings")
+        self.tree.heading("Command", text="Command")
+        self.tree.heading("Description", text="Description / Usage")
+        self.tree.heading("Permission", text="Permission")
+
+        self.tree.column("Command", width=150, stretch=False, anchor="w")
+        self.tree.column("Description", width=450, anchor="w")
+        self.tree.column("Permission", width=200, stretch=False, anchor="center")
+
+        self.tree.tag_configure('oddrow', background='#f0f0f0')
+        self.tree.tag_configure('evenrow', background='white')
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.tree.bind("<Double-1>", self.on_double_click)
+
+    def populate_tree(self):
+        # Clear existing items
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        # Populate with new data
+        for i, (name, data) in enumerate(sorted(self.commands.items())):
+            tag = 'evenrow' if i % 2 == 0 else 'oddrow'
+            self.tree.insert("", "end", values=(name, data['description'], data['permission']), tags=(tag,), iid=name)
+
+    def on_double_click(self, event):
+        # Clean up any existing editor
+        if hasattr(self, '_editor') and self._editor.winfo_exists():
+            self._editor.destroy()
+
+        rowid = self.tree.identify_row(event.y)
+        column_id = self.tree.identify_column(event.x)
+        
+        if not rowid or self.tree.heading(column_id, "text") != "Permission":
+            return
+
+        x, y, width, height = self.tree.bbox(rowid, column_id)
+
+        current_value = self.tree.set(rowid, "Permission")
+        
+        self._editor = ttk.Combobox(self.tree, values=self.grades, state="readonly")
+        self._editor.set(current_value)
+        self._editor.place(x=x, y=y, width=width, height=height)
+        
+        self._editor.focus_force()
+        # Drop down the list automatically
+        self._editor.event_generate('<Button-1>')
+
+        def on_combo_select(event):
+            new_permission = self._editor.get()
+            self.tree.set(rowid, "Permission", new_permission)
+            command_name = self.tree.item(rowid, "values")[0]
+            self.commands[command_name]['permission'] = new_permission
+            self._editor.destroy()
+
+        def on_focus_out(event):
+            if hasattr(self, '_editor') and self._editor.winfo_exists():
+                self._editor.destroy()
+
+        self._editor.bind("<<ComboboxSelected>>", on_combo_select)
+        self._editor.bind("<FocusOut>", on_focus_out)
+        self._editor.bind("<Escape>", lambda e: self._editor.destroy())
+
+    def save_changes(self):
+        changed_files = set()
+        for name, data in self.commands.items():
+            if data['permission'] != data['original_permission']:
+                filepath = data['file']
+                
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+
+                    old_line = f"REGISTER_CMD({name}, Common::Enums::PlayerGrade::{data['original_permission']})"
+                    new_line = f"REGISTER_CMD({name}, Common::Enums::PlayerGrade::{data['permission']})"
+                    
+                    if old_line in content:
+                        content = content.replace(old_line, new_line, 1)
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        
+                        data['original_permission'] = data['permission']
+                        changed_files.add(os.path.basename(filepath))
+                    else:
+                        messagebox.showwarning("Warning", f"Could not find the line to update for command '{name}' in {os.path.basename(filepath)}. It might have been modified externally or the file has changed.")
+
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to save changes for {name} in {os.path.basename(filepath)}.\n\nError: {e}")
+
+
+        if changed_files:
+            messagebox.showinfo("Success", f"Changes saved successfully to:\n\n" + "\n".join(sorted(list(changed_files))))
+        else:
+            messagebox.showinfo("No Changes", "No permissions were changed.")
+        
+        self.destroy()
+
 def main():
     root = ThemedTk(theme="scidblue")
     
@@ -1687,4 +2297,7 @@ def main():
     root.mainloop()
 
 if __name__ == "__main__":
+    # This is important for multiprocessing on Windows
+    from multiprocessing import freeze_support
+    freeze_support()
     main()
