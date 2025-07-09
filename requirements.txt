@@ -2,3 +2,4 @@ requests
 ttkthemes
 PyQt6
 mariadb
+customtkinter
