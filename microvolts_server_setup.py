@@ -114,32 +114,78 @@ def worker_setup_vcpkg(q, config):
         ext_lib_path = os.path.join(repo_path, "ExternalLibraries")
         os.makedirs(ext_lib_path, exist_ok=True)
         
-        worker_log(q, "Cloning vcpkg repository...")
         vcpkg_path = os.path.join(ext_lib_path, "vcpkg")
         
-        if os.path.exists(vcpkg_path):
-            shutil.rmtree(vcpkg_path)
+        if not os.path.exists(os.path.join(vcpkg_path, ".git")):
+            worker_log(q, "Cloning vcpkg repository...")
+            if os.path.exists(vcpkg_path):
+                shutil.rmtree(vcpkg_path)
             
-        result = subprocess.run([
-            "git", "clone", "https://github.com/microsoft/vcpkg.git", vcpkg_path
-        ], capture_output=True, text=True, check=False)
-        
-        if result.returncode != 0:
-            raise Exception(f"Git clone failed: {result.stderr}")
+            result = subprocess.run([
+                "git", "clone", "https://github.com/microsoft/vcpkg.git", vcpkg_path
+            ], capture_output=True, text=True, check=False)
             
+            if result.returncode != 0:
+                raise Exception(f"Git clone failed: {result.stderr}")
+        else:
+            worker_log(q, "vcpkg repository already exists.")
+
         worker_log(q, "Bootstrapping vcpkg...")
         bootstrap_script = os.path.join(vcpkg_path, "bootstrap-vcpkg.bat")
         result = subprocess.run([bootstrap_script], cwd=vcpkg_path, capture_output=True, text=True, check=False)
-        
         if result.returncode != 0:
-            worker_log(q, f"Bootstrap warning: {result.stderr}")
-            
-        worker_log(q, "vcpkg setup completed")
+            worker_log(q, f"Bootstrap warning/error: {result.stderr or result.stdout}")
+
+        worker_log(q, "Integrating vcpkg with Visual Studio...")
+        vcpkg_exe = os.path.join(vcpkg_path, "vcpkg.exe")
+        result = subprocess.run([vcpkg_exe, "integrate", "install"], cwd=vcpkg_path, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            worker_log(f"vcpkg integrate install failed: {result.stderr or result.stdout}")
+        else:
+            worker_log(q, "vcpkg integrated successfully.")
+
+        vcpkg_json_source = os.path.join(repo_path, "vcpkg.json")
+        vcpkg_json_dest = os.path.join(vcpkg_path, "vcpkg.json")
+        if os.path.exists(vcpkg_json_source):
+            worker_log(q, f"Moving vcpkg.json to {vcpkg_path}")
+            shutil.move(vcpkg_json_source, vcpkg_json_dest)
+        else:
+            worker_log(q, "Root vcpkg.json not found, skipping move. It might already be in place.")
+
+        worker_log(q, "Running vcpkg install...")
+        result = subprocess.run([vcpkg_exe, "install"], cwd=vcpkg_path, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise Exception(f"vcpkg install failed: {result.stderr or result.stdout}")
+
+        worker_log(q, "vcpkg setup and package installation completed")
         q.put({'type': 'result', 'success': True})
     except Exception as e:
         worker_log(q, f"Failed to setup vcpkg: {str(e)}")
         q.put({'type': 'result', 'success': False})
 
+def worker_delete_service(q, service_name):
+    """Attempts to delete a Windows service."""
+    try:
+        worker_log(q, f"Attempting to delete service: {service_name}")
+        # Use sc.exe to delete the service. This is a standard Windows command.
+        # We don't check the return code here because it will fail if the service doesn't exist,
+        # which is a normal and expected outcome in many cases.
+        result = subprocess.run(['sc', 'delete', service_name], capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            worker_log(q, f"Service '{service_name}' deleted successfully.")
+        else:
+            # It's not necessarily an error if the service doesn't exist.
+            # We can check the output to be more specific.
+            if "The specified service does not exist" in result.stderr:
+                worker_log(q, f"Service '{service_name}' did not exist, no action needed.")
+            else:
+                worker_log(q, f"Warning: 'sc delete {service_name}' failed with code {result.returncode}: {result.stderr.strip()}")
+        return True
+    except Exception as e:
+        worker_log(q, f"An error occurred while trying to delete service '{service_name}': {e}")
+        # We don't want to fail the whole installation for this, so we return True.
+        # The installer will likely fail with a more specific error if this was the root cause.
+        return True
 def worker_install_mariadb(q, config):
     try:
         if config['existing_mariadb']:
@@ -147,34 +193,94 @@ def worker_install_mariadb(q, config):
             q.put({'type': 'result', 'success': True})
             return
 
+        # Attempt to delete a lingering service from a previous failed install
+        worker_delete_service(q, "MariaDB")
+
         worker_log(q, "Installing MariaDB...")
         mariadb_version = "11.5.1"
-        mariadb_url = f"https://archive.mariadb.org/mariadb-{mariadb_version}/winx64-packages/mariadb-{mariadb_version}-winx64.msi"
-        installer_path = os.path.join(config['project_path'], f"mariadb-{mariadb_version}-winx64.msi")
-
-        response = requests.get(mariadb_url, stream=True)
-        response.raise_for_status()
-
-        with open(installer_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        installer_name = f"mariadb-{mariadb_version}-winx64.msi"
         
-        worker_log(q, "MariaDB downloaded. Installing...")
+        try:
+            script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        except NameError:
+            script_dir = os.getcwd()
+
+        installer_path = os.path.join(script_dir, installer_name)
+
+        if not os.path.exists(installer_path):
+            worker_log(q, f"MariaDB installer not found at '{installer_path}'. Attempting to download...")
+            mariadb_url = f"https://archive.mariadb.org/mariadb-{mariadb_version}/winx64-packages/{installer_name}"
+            
+            try:
+                response = requests.get(mariadb_url, stream=True)
+                response.raise_for_status()
+
+                with open(installer_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                worker_log(q, "MariaDB installer downloaded successfully.")
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Could not download MariaDB installer: {e}. Please place '{installer_name}' in the same directory as the setup script and try again."
+                worker_log(q, error_msg)
+                worker_show_error(q, "Download Failed", error_msg)
+                q.put({'type': 'result', 'success': False})
+                return
+        else:
+            worker_log(q, f"Found existing MariaDB installer: {installer_path}")
         
+        worker_log(q, "Starting MariaDB installation (this may take a few minutes)...")
+        
+        log_file_path = os.path.join(config['project_path'], "mariadb_install_log.txt")
+        worker_log(q, f"MariaDB installation log will be saved to: {log_file_path}")
+
         install_cmd = [
             'msiexec', '/i', installer_path, '/qn',
+            f'/L*v', log_file_path,
             f'PASSWORD={config["db_password"]}',
-            'ADDLOCAL=ALL'
+            'ADDLOCAL=ALL',
+            'SERVICENAME=MariaDB',
+            'PORT=3306',
+            'CLEANUPDATA=1'
         ]
         result = subprocess.run(install_cmd, capture_output=True, text=True, check=False)
 
         if result.returncode not in [0, 3010]:
-            raise Exception(f"MariaDB installation failed: {result.stderr}")
+            log_contents = ""
+            try:
+                with open(log_file_path, 'r', encoding='utf-8', errors='ignore') as log_file:
+                    log_contents = log_file.read()
+            except Exception as e:
+                worker_log(q, f"Could not read MariaDB install log: {e}")
+
+            if "CreateService failed (1073)" in log_contents:
+                error_message = (
+                    "MariaDB installation failed because the service already exists.\n\n"
+                    "The setup tried to remove the old service automatically but failed, "
+                    "likely due to insufficient permissions.\n\n"
+                    "Please run this setup tool as an Administrator."
+                )
+                worker_log(q, "Detected 'CreateService failed (1073)' error. Instructing user to run as admin.")
+            elif "data directory exist and not empty" in log_contents:
+                error_message = (
+                    "MariaDB installation failed because the data directory is not empty.\n\n"
+                    "Please manually delete the following directory and then try again:\n"
+                    "C:\\Program Files\\MariaDB 11.5\\data"
+                )
+                worker_log(q, "Detected 'data directory not empty' error. Instructing user to manually delete.")
+            else:
+                error_message = f"MariaDB installation failed with exit code {result.returncode}.\n\nPlease check the log file for details:\n{log_file_path}"
+                worker_log(q, error_message)
+                if log_contents:
+                     worker_log(q, f"--- MariaDB Install Log (last 2000 chars) ---\n{log_contents[-2000:]}")
+
+            worker_show_error(q, "MariaDB Installation Failed", error_message)
+            q.put({'type': 'result', 'success': False})
+            return
 
         worker_log(q, "MariaDB installed successfully.")
         q.put({'type': 'result', 'success': True})
     except Exception as e:
-        worker_log(q, f"Failed to install MariaDB: {e}")
+        worker_log(q, f"An unexpected error occurred during MariaDB installation: {e}")
         q.put({'type': 'result', 'success': False})
 
 def worker_setup_database(q, config):
@@ -187,15 +293,39 @@ def worker_setup_database(q, config):
             raise Exception("Database script not found")
 
         mysql_exe = ""
-        for version in ["11.5", "11.4", "11.3", "11.2", "11.1", "11.0", "10.11", "10.6", "10.5"]:
-            path = f"C:\\Program Files\\MariaDB {version}\\bin\\mysql.exe"
-            if os.path.exists(path):
-                mysql_exe = path
-                break
+        custom_path = config.get("mariadb_path")
+
+        if custom_path:
+            path_to_check = os.path.join(custom_path, "bin", "mysql.exe")
+            if os.path.exists(path_to_check):
+                mysql_exe = path_to_check
+                worker_log(q, f"Using custom MariaDB path: {mysql_exe}")
+
+        if not mysql_exe:
+            worker_log(q, "Custom MariaDB path not provided or invalid. Searching default locations...")
+            for version in ["11.5", "11.4", "11.3", "11.2", "11.1", "11.0", "10.11", "10.6", "10.5"]:
+                path = f"C:\\Program Files\\MariaDB {version}\\bin\\mysql.exe"
+                if os.path.exists(path):
+                    mysql_exe = path
+                    worker_log(q, f"Found MariaDB at: {mysql_exe}")
+                    break
         
         if not mysql_exe:
-            raise Exception("Could not find mysql.exe")
+            raise Exception("Could not find mysql.exe. Please specify the path in the DB Config tab if you have an existing installation.")
 
+        # Create the database first
+        worker_log(q, f"Ensuring database '{config['db_name']}' exists...")
+        create_db_cmd = [
+            mysql_exe, "-u", config['db_username'], f"-p{config['db_password']}",
+            "-h", config['db_ip'], f"-P", str(config['db_port']),
+            "-e", f"CREATE DATABASE IF NOT EXISTS `{config['db_name']}`;"
+        ]
+        result = subprocess.run(create_db_cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise Exception(f"Failed to create database: {result.stderr}")
+        worker_log(q, f"Database '{config['db_name']}' created or already exists.")
+
+        # Now import the script
         with open(sql_script_path, 'r') as f:
             sql_script_content = f.read()
 
@@ -237,6 +367,7 @@ class MicroVoltsServerSetup(customtkinter.CTk):
         self.config_file = "mv_setup_config.json"
         self.existing_mariadb = tk.BooleanVar(value=False)
         self.db_root_password = tk.StringVar()
+        self.mariadb_path = tk.StringVar()
 
         self.state_file = "setup_state.json"
         self.setup_state = {}
@@ -275,6 +406,11 @@ class MicroVoltsServerSetup(customtkinter.CTk):
         if directory:
             self.project_path.set(directory)
 
+    def browse_mariadb_directory(self):
+        directory = filedialog.askdirectory()
+        if directory:
+            self.mariadb_path.set(directory)
+
     def load_settings(self):
         if os.path.exists(self.config_file):
             self.log(f"Loading settings from {self.config_file}")
@@ -289,6 +425,7 @@ class MicroVoltsServerSetup(customtkinter.CTk):
                 self.db_username.set(config.get("db_username", "root"))
                 self.db_password.set(config.get("db_password", ""))
                 self.db_name.set(config.get("db_name", "microvolts-db"))
+                self.mariadb_path.set(config.get("mariadb_path", ""))
                 
                 for widgets in self.server_widgets:
                     widgets["frame"].destroy()
@@ -339,6 +476,7 @@ class MicroVoltsServerSetup(customtkinter.CTk):
                 "db_username": self.db_username.get(),
                 "db_password": self.db_password.get(),
                 "db_name": self.db_name.get(),
+                "mariadb_path": self.mariadb_path.get(),
                 "servers": servers_data
             }
             with open(self.config_file, 'w') as f:
@@ -436,6 +574,15 @@ class MicroVoltsServerSetup(customtkinter.CTk):
         self.existing_db_frame.grid_columnconfigure(1, weight=1)
         customtkinter.CTkLabel(self.existing_db_frame, text="Root Password:").grid(row=0, column=0, sticky=tk.W, pady=5, padx=10)
         customtkinter.CTkEntry(self.existing_db_frame, textvariable=self.db_root_password, show="*").grid(row=0, column=1, sticky="ew", pady=5, padx=5)
+
+        self.mariadb_path_frame = customtkinter.CTkFrame(self.existing_db_frame)
+        self.mariadb_path_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5,0), padx=0)
+        self.mariadb_path_frame.grid_columnconfigure(1, weight=1)
+
+        customtkinter.CTkLabel(self.mariadb_path_frame, text="MariaDB Path:").grid(row=0, column=0, sticky=tk.W, pady=5, padx=10)
+        customtkinter.CTkEntry(self.mariadb_path_frame, textvariable=self.mariadb_path, placeholder_text="Optional: Auto-detect if empty").grid(row=0, column=1, sticky="ew", pady=5, padx=5)
+        customtkinter.CTkButton(self.mariadb_path_frame, text="Browse...", command=self.browse_mariadb_directory, width=100).grid(row=0, column=2, pady=5, padx=5)
+        
         self.toggle_mariadb_fields()
 
     def setup_multi_server_tab(self, tab):
@@ -841,6 +988,7 @@ class MicroVoltsServerSetup(customtkinter.CTk):
             "db_name": self.db_name.get(),
             "existing_mariadb": self.existing_mariadb.get(),
             "db_root_password": self.db_root_password.get(),
+            "mariadb_path": self.mariadb_path.get(),
             "servers": [
                 {
                     "main_local_ip": w["main_local_ip"].get(),
@@ -865,6 +1013,7 @@ class MicroVoltsServerSetup(customtkinter.CTk):
             ("extract_cleanup", self.extract_and_cleanup, False),
             ("setup_vcpkg", worker_setup_vcpkg, True),
             ("configure_project", self.configure_project, False),
+            ("configure_vs_projects", self.worker_configure_vs_projects, False),
             ("install_mariadb", worker_install_mariadb, True),
             ("setup_config", self.setup_config, False),
             ("setup_database", worker_setup_database, True)
@@ -1073,16 +1222,21 @@ class MicroVoltsServerSetup(customtkinter.CTk):
             subprocess.run(["git", "fetch"], cwd=repo_path, check=True, capture_output=True, text=True)
             status_result = subprocess.run(["git", "status", "-uno"], cwd=repo_path, check=True, capture_output=True, text=True)
             
+            updated = False
             if "Your branch is behind" in status_result.stdout:
                 if messagebox.askyesno("Update Available", "A new version of the emulator is available. Would you like to update now?"):
                     self.log("New update found. Pulling changes...")
                     subprocess.run(["git", "pull"], cwd=repo_path, check=True, capture_output=True, text=True)
-                    if messagebox.askyesno("Recompile Project", "Would you like to recompile the project now?"):
-                        self.run_recompile_in_thread()
+                    self.log("Update complete.")
+                    updated = True
             else:
                 self.log("You have the most updated version of the Emulator available.")
                 if not startup:
                     messagebox.showinfo("Up to Date", "You have the most updated version of the Emulator available.")
+
+            if not startup or updated:
+                if messagebox.askyesno("Recompile Project", "Would you like to recompile the project now?"):
+                    self.run_recompile_in_thread()
 
         except subprocess.CalledProcessError as e:
             self.log(f"Error checking for updates: {e.stderr}")
@@ -1098,6 +1252,9 @@ class MicroVoltsServerSetup(customtkinter.CTk):
         recompile_thread.daemon = True
         recompile_thread.start()
 
+    def schedule_gui_task(self, func, *args):
+        self.after(0, lambda: func(*args))
+
     def run_recompile(self):
         if self.recompile_project():
             self.schedule_gui_task(messagebox.showinfo, "Success", "Project recompiled successfully.")
@@ -1109,9 +1266,135 @@ class MicroVoltsServerSetup(customtkinter.CTk):
         self.update_button.configure(state=tk.NORMAL)
         self.progress_bar.stop()
 
+    def find_vcvarsall(self):
+        self.log("Finding vcvarsall.bat...")
+        try:
+            vswhere_path = None
+            possible_paths = [
+                os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft Visual Studio", "Installer", "vswhere.exe"),
+                os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft Visual Studio", "Installer", "vswhere.exe")
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    vswhere_path = path
+                    break
+            
+            if not vswhere_path:
+                self.log("vswhere.exe not found.")
+                return None
+
+            cmd = [vswhere_path, "-latest", "-property", "installationPath"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            vs_path = result.stdout.strip()
+            
+            if not vs_path:
+                self.log("Visual Studio installation path not found.")
+                return None
+
+            vcvarsall_path = os.path.join(vs_path, "VC", "Auxiliary", "Build", "vcvarsall.bat")
+            if os.path.exists(vcvarsall_path):
+                self.log(f"Found vcvarsall.bat at: {vcvarsall_path}")
+                return vcvarsall_path
+            else:
+                self.log("vcvarsall.bat not found in the latest VS installation.")
+                return None
+        except Exception as e:
+            self.log(f"Error finding vcvarsall.bat: {e}")
+            return None
+
+    def find_msbuild(self):
+        self.log("Finding MSBuild.exe...")
+        try:
+            vswhere_path = None
+            possible_paths = [
+                os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft Visual Studio", "Installer", "vswhere.exe"),
+                os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft Visual Studio", "Installer", "vswhere.exe")
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    vswhere_path = path
+                    break
+            
+            if not vswhere_path:
+                self.log("vswhere.exe not found.")
+                return None
+
+            cmd = [vswhere_path, "-latest", "-requires", "Microsoft.Component.MSBuild", "-find", "MSBuild\\**\\Bin\\MSBuild.exe"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            msbuild_path = result.stdout.strip()
+
+            if msbuild_path and os.path.exists(msbuild_path):
+                self.log(f"Found MSBuild.exe at: {msbuild_path}")
+                return msbuild_path
+            else:
+                self.log("MSBuild.exe not found via vswhere.")
+                return None
+        except Exception as e:
+            self.log(f"Error finding MSBuild.exe: {e}")
+            return None
+            
     def recompile_project(self):
         self.log("Attempting to recompile project...")
-        return True
+        
+        msbuild_path = self.find_msbuild()
+        if not msbuild_path:
+            self.log("Could not find MSBuild.exe. Cannot recompile.")
+            self.schedule_gui_task(messagebox.showerror, "Error", "Could not find MSBuild.exe. Please ensure Visual Studio is installed correctly.")
+            return False
+
+        vcvarsall_path = self.find_vcvarsall()
+        if not vcvarsall_path:
+            self.log("Could not find vcvarsall.bat. Cannot recompile.")
+            self.schedule_gui_task(messagebox.showerror, "Error", "Could not find vcvarsall.bat. Please ensure Visual Studio C++ tools are installed.")
+            return False
+
+        repo_path = os.path.join(self.project_path.get(), "MicrovoltsEmulator")
+        sln_file = os.path.join(repo_path, "Microvolts-Emulator-V2.sln")
+        if not os.path.exists(sln_file):
+            self.log(f"Solution file not found at {sln_file}")
+            self.schedule_gui_task(messagebox.showerror, "Error", f"Solution file (.sln) not found.")
+            return False
+
+        try:
+            self.log("Starting recompile process...")
+            
+            compile_cmd = (
+                f'call "{vcvarsall_path}" x64 && '
+                f'"{msbuild_path}" "{sln_file}" /t:Rebuild /p:Configuration=Release /p:Platform=x64'
+            )
+
+            self.log(f"Executing command: {compile_cmd}")
+
+            process = subprocess.Popen(
+                compile_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                shell=True,
+                cwd=repo_path,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                encoding='utf-8',
+                errors='replace'
+            )
+
+            for line in iter(process.stdout.readline, ''):
+                self.log(line.strip())
+
+            process.stdout.close()
+            return_code = process.wait()
+
+            if return_code == 0:
+                self.log("Recompile successful.")
+                return True
+            else:
+                self.log(f"Recompile failed with exit code: {return_code}")
+                self.schedule_gui_task(messagebox.showerror, "Recompile Failed", f"Recompilation failed with exit code {return_code}. Check the log for details.")
+                return False
+
+        except Exception as e:
+            self.log(f"An error occurred during recompilation: {e}")
+            self.schedule_gui_task(messagebox.showerror, "Recompile Error", f"An unexpected error occurred during recompilation:\n{e}")
+            return False
 
     def find_mariadb_executable(self):
         self.log("Searching for MariaDB executable...")
@@ -1150,6 +1433,12 @@ class MicroVoltsServerSetup(customtkinter.CTk):
             
     def configure_project(self):
         self.log("Project configuration completed")
+        return True
+        
+    def worker_configure_vs_projects(self):
+        self.log("Configuring Visual Studio projects...")
+        # Placeholder for the logic to modify .vcxproj files.
+        self.log("Visual Studio project configuration step is a placeholder.")
         return True
         
     def setup_config(self):
