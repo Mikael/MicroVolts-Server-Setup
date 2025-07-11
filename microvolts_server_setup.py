@@ -1156,6 +1156,25 @@ class MicroVoltsServerSetup(customtkinter.CTk):
             return False
         else:
             self.log("Visual Studio with C++ workload found.")
+
+        seven_zip_version = self.get_7z_version()
+        if seven_zip_version:
+            try:
+                major, minor = map(int, seven_zip_version.split('.'))
+                if major > 24 or (major == 24 and minor >= 9):
+                    self.log(f"7-Zip version {seven_zip_version} is sufficient (>= 24.09).")
+                else:
+                    self.log(f"7-Zip version {seven_zip_version} is too old. Version 24.09 or newer is required.")
+                    messagebox.showerror("Prerequisite Missing", f"Your 7-Zip version ({seven_zip_version}) is too old.\nPlease upgrade to version 24.09 or newer for vcpkg to work correctly.")
+                    return False
+            except ValueError:
+                self.log(f"Could not parse 7-Zip version: {seven_zip_version}")
+                messagebox.showerror("Prerequisite Error", f"Could not parse the 7-Zip version string: {seven_zip_version}")
+                return False
+        else:
+            self.log("7-Zip is not installed or could not be found.")
+            messagebox.showerror("Prerequisite Missing", "7-Zip is not installed or could not be found in your PATH.\nPlease install version 24.09 or newer and ensure it's in your system's PATH.")
+            return False
             
         return True
 
@@ -1203,6 +1222,60 @@ class MicroVoltsServerSetup(customtkinter.CTk):
         except Exception as e:
             self.log(f"Failed to download or install Git: {e}")
             messagebox.showerror("Error", f"Failed to install Git: {e}")
+
+    def get_7z_version(self):
+        self.log("Checking for 7-Zip version...")
+        try:
+            # Common paths for 7-Zip
+            possible_paths = [
+                "C:\\Program Files\\7-Zip\\7z.exe",
+                "C:\\Program Files (x86)\\7-Zip\\7z.exe"
+            ]
+            
+            seven_zip_exe = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    seven_zip_exe = path
+                    break
+            
+            if not seven_zip_exe:
+                # Check PATH if not in common locations
+                result = subprocess.run(['where', '7z'], capture_output=True, text=True, shell=True, check=False)
+                if result.returncode == 0:
+                    # Take the first result
+                    seven_zip_exe = result.stdout.strip().split('\n')[0]
+
+            if not seven_zip_exe or not os.path.exists(seven_zip_exe):
+                self.log("7-Zip executable not found.")
+                return None
+
+            self.log(f"Found 7-Zip at: {seven_zip_exe}")
+            # Running 7z.exe without arguments prints help and version info
+            result = subprocess.run([seven_zip_exe], capture_output=True, text=True, check=False)
+            
+            # 7-Zip can output version info to stdout or stderr depending on the version and context
+            output = result.stdout + result.stderr
+            
+            # Regex to find "7-Zip 24.09" or similar patterns
+            version_match = re.search(r"7-Zip(?: \[.+\])? (\d+\.\d+)", output)
+            if version_match:
+                version = version_match.group(1)
+                self.log(f"Found 7-Zip version: {version}")
+                return version
+            
+            # Fallback for just "Version X.XX"
+            version_match = re.search(r"Version (\d+\.\d+)", output, re.IGNORECASE)
+            if version_match:
+                version = version_match.group(1)
+                self.log(f"Found 7-Zip version (fallback): {version}")
+                return version
+
+            self.log("Could not determine 7-Zip version from output.")
+            return None
+
+        except Exception as e:
+            self.log(f"Error checking for 7-Zip version: {e}")
+            return None
 
     def startup_update_check(self):
         if self.project_path.get() and os.path.exists(os.path.join(self.project_path.get(), "MicrovoltsEmulator", ".git")):
